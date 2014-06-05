@@ -1,11 +1,18 @@
 # --------------------------------------------------
 # importMTCdata.R
+#
+# Alex Karner
+# alex.karner@gmail.com
 # 
-# This script takes input from MTC's travel model and outputs various aggregations (vmt, mean travel costs 
-# and times by trip and traveler type, etc.). Specifically, we use the scenarios developed for the Plan Bay Area 
-# DEIR. There are five scenarios for 2020 and 2040 as well as one base year 2010 scenario. Here, we build results
-# databases aimed at determining aggregate VMT at the household and TAZ levels, producing tables ready to be 
-# linked to GIS.
+# This script takes outpus from MTC's activity-based travel model and creates a MonetDB-backed database 
+# to facilitate analysis. We use the scenarios developed for the 2013 Plan Bay Area DEIR. Currently, 
+# the script imports data for the 2010 base year, the Proposed Plan Scenario (2020, 2040), and the EEJ 
+# scenario (2020, 2040). It creates tables for many of the output categories and joins skims to trip and 
+# tour tables.
+#
+# MTC makes some of its activity-based model outputs available to the public on the web:
+# http://mtcgis.mtc.ca.gov/foswiki/
+# The code contained here could be modified to use those outputs quite easily. 
 #
 # Big thanks to Anthony Damico for providing the inspiration to use MonetDB.
 # More info available at: https://github.com/ajdamico/usgsd
@@ -189,7 +196,7 @@ for(i in trips$paths) {
 	
 	# Quickly figure out the number of lines in the data file
 	chunk_size <- 1000
-	testcon <- file(i ,open = "r")
+	testcon <- file(i, open = "r")
 	nooflines <- 0
 	while((linesread <- length(readLines(testcon, chunk_size))) > 0)
 		nooflines <- nooflines + linesread
@@ -224,9 +231,9 @@ for(i in tripsJ$paths) {
 	
 	# quickly figure out the number of lines in the data file
 	chunk_size <- 1000
-	testcon <- file(i ,open = "r")
+	testcon <- file(i, open = "r")
 	nooflines <- 0
-	while((linesread <- length(readLines(testcon , chunk_size))) > 0)
+	while((linesread <- length(readLines(testcon, chunk_size))) > 0)
 		nooflines <- nooflines + linesread
 	close(testcon)
 	
@@ -367,15 +374,17 @@ for(i in skims$paths) {
 # End skim data
 # ------------------------------------------------------
 
-
 # ---------------------------------------------
 # Match TRIPS to skims and update TRIP tables
 # Outcome: Trip tables contain new columns containing the time, distance, and cost of each trip
 # ---------------------------------------------
 
-# Create a new table for each scenario that will contain the matching skim for each trip in the trip list.
-# This table will initially have no data, and we'll fill it with an 'insert into' query
-# in the next step. This makes it easier to deal with the five different time periods used by the travel model.
+# Create a new table for each scenario and for each skim type that will contain the matching skim for 
+# each trip in the trip list.
+# These tables will initially have no data, and we'll fill it with an 'insert into' query
+# in the next step. This approach makes it easier to deal with the five different time periods used by 
+# the travel model.
+
 for(i in scenarios$names) {
 	for(j in types) {
 	
@@ -410,12 +419,13 @@ for(i in scenarios$names) {
 	}
 }
 
-# Loop through the skim tables for the five time periods and join to the appropriate trip records 
+# Insert a record into each matched skim table that contains trip details and all skims.
+# Iterate through all five time periods, joining the appropraite skim based on the trip's departure hour. 
 for(i in scenarios$names) {
 	for(j in types) {
 		for(k in times) {
 	
-		# define a time-of-day flag so that we join the correct skims
+		# Define a time-of-day flag so that we join the correct skims
 		depart_hours <- ifelse(k == "EA", "3,4,5",
 										ifelse(k == "AM", "6,7,8,9",
 										ifelse(k == "MD", "10,11,12,13,14",
@@ -426,7 +436,7 @@ for(i in scenarios$names) {
 			SELECT idkey, orig_taz, dest_taz, depart_hour, trip_mode, inbound, da, daToll, s2, s2toll, s3, s3toll, 
 			walk, bike 
 			FROM trips_", i," t1 
-			INNER JOIN ",j, "_skims_", i, "_", k, " t2 
+			INNER JOIN ", j, "_skims_", i, "_", k, " t2 
 			ON t1.orig_taz = t2.orig AND t1.dest_taz = t2.dest 
 			WHERE depart_hour IN (", depart_hours, ")")),
 			
@@ -435,7 +445,7 @@ for(i in scenarios$names) {
 			select idkey, orig_taz, dest_taz, depart_hour, trip_mode, inbound, da, daToll, s2, s2toll, s3, s3toll, 
 			wtrnw, dtrnw, wtrnd 
 			FROM trips_", i," t1 
-			INNER JOIN ",j, "_skims_", i,"_", k," t2 
+			INNER JOIN ", j, "_skims_", i, "_", k, " t2 
 			ON t1.orig_taz = t2.orig AND t1.dest_taz = t2.dest 
 			WHERE depart_hour IN (", depart_hours, ")")),
 		
@@ -444,23 +454,24 @@ for(i in scenarios$names) {
 			SELECT idkey, orig_taz, dest_taz, depart_hour, trip_mode, inbound, da, daToll, s2, s2toll, s3, s3toll, 
 			walk, bike, wtrnw, dtrnw, wtrnd 
 			FROM trips_", i," t1 
-			INNER JOIN ",j, "_skims_", i,"_", k," t2 
+			INNER JOIN ", j, "_skims_", i, "_", k, " t2 
 			ON t1.orig_taz = t2.orig AND t1.dest_taz = t2.dest 
 			WHERE depart_hour IN (", depart_hours, ")"))
-		)) #ifelse statements
+		)) # ifelse statements
 			
 		}
 	}
 }
 
-# create columns in the matched skim tables and trip tables to store the skim results
+# Create columns in the matched skim tables and trip tables to store the skim results.
+# Place the correct skim in that column based on the trip's mode choice. 
 for(i in scenarios$names) {
 	for(j in types) {
 	
 	# Add columns in the matched table and trip tables to store the matched skim results
 	dbSendUpdate(db, paste0("ALTER TABLE matched_skims_", i, "_", j," ADD COLUMN matched float"))
 		
-	# these updates are the same regardless of skim type
+	# These updates are the same regardless of skim type
 	dbSendUpdate(db, paste0("UPDATE matched_skims_", i, "_", j," SET matched = da WHERE trip_mode = 1"))
 	dbSendUpdate(db, paste0("UPDATE matched_skims_", i, "_", j," SET matched = daToll WHERE trip_mode = 2"))
 	dbSendUpdate(db, paste0("UPDATE matched_skims_", i, "_", j," SET matched = s2 WHERE trip_mode = 3"))
@@ -494,7 +505,7 @@ for(i in scenarios$names) {
 			dbSendUpdate(db, paste0("UPDATE matched_skims_", i, "_", j," SET matched = wtrnd 
 				WHERE trip_mode in (14,15,16,17,18) AND inbound = 1"))
 		}
-	) ) #ifelse statements
+	) ) # ifelse statements
 		
 	}
 }	
@@ -524,17 +535,22 @@ for(i in scenarios$names) {
 # Outcome: Tour tables contain a column that describes the time, distance, and cost of each trip
 # ---------------------------------------------
 
-# create a new table for each scenario with no data so we can use an insert query in the for loop below
+# Create inbound and outbound tables for each scenario and each skim type 
+# that will contain the matching skim for each tour in the tour list.
+# These tables will initially have no data, and we'll fill it with an 'insert into' query
+# in the next step. This approach makes it easier to deal with the five different time periods used by 
+# the travel model.
+
 for(i in tours$names) {
 	for(j in types) {
 		for(k in direction) {
 	
 		ifelse(j == "Distance",
 		dbSendUpdate(db, paste0(
-			"CREATE TABLE ", k, "_tour_skims_", i, "_", j," 
+			"CREATE TABLE ", k, "_tour_skims_", i, "_", j, " 
 			AS SELECT idkey, orig_taz, dest_taz, start_hour, end_hour, tour_mode, da, daToll, s2, s2toll, s3, s3toll, 
 			walk, bike from tours_", i, " t1 
-			INNER JOIN ", j, "_skims_",i ,"_ea t2 
+			INNER JOIN ", j, "_skims_",i , "_ea t2 
 			ON t1.orig_taz = t2.orig AND t1.dest_taz = t2.dest WITH NO DATA")),
 		
 		ifelse(j == "Cost",	
@@ -553,18 +569,20 @@ for(i in tours$names) {
 			FROM tours_", i, " t1 
 			INNER JOIN ", j, "_skims_", i, "_ea t2 
 			ON t1.orig_taz = t2.orig AND t1.dest_taz = t2.dest WITH NO DATA"))			
-		)) #ifelse statements
+		)) # ifelse statements
 		
 		}
 	}
 }
 
-# loop through the skim tables for the five time periods and join to the appropriate OUTBOUND TOUR records 
+# Insert a record into the matched skim table that contains outbound tour details and all skims.
+# Iterate through all five time periods, joining the appropraite skim based on the tour's departure hour. 
+
 for(i in tours$names) {
 	for(j in types) {
 		for(k in times) {
 	
-		# define a time-of-day flag so that we join the correct skims
+		# Define a time-of-day flag so that we join the correct skims
 		depart_hours <- ifelse(k == "EA", "3,4,5",
 										ifelse(k == "AM", "6,7,8,9",
 										ifelse(k == "MD", "10,11,12,13,14",
@@ -599,14 +617,15 @@ for(i in tours$names) {
 			INNER JOIN ",j, "_skims_", i,"_", k," t2 
 			ON t1.orig_taz = t2.orig AND t1.dest_taz = t2.dest 
 			WHERE start_hour IN (", depart_hours, ")"))
-		)) #ifelse statements
+		)) # ifelse statements
 			
 		}
 	}
 }
 
-# loop through the skim tables for the five time periods and join to the appropriate INBOUND TOUR records 
-# for these loops, origin and destination from the skim table are switched
+# Loop through the skim tables for the five time periods and join to the appropriate INBOUND TOUR records 
+# for these loops, origin and destination from the skim table are switched.
+
 for(i in tours$names) {
 	for(j in types) {
 		for(k in times) {
@@ -707,7 +726,7 @@ for(i in tours$names) {
 					WHERE tour_mode in (9,10,11,12,13)")) 
 				dbSendUpdate(db, paste0("UPDATE ", k, "_tour_skims_", i, "_", j," SET matched = wtrnd 
 					WHERE tour_mode IN (14,15,16,17,18)")) }
-	)))) #ifelse statements
+	)))) # ifelse statements
 	
 		}
 	}
@@ -849,21 +868,19 @@ for(i in wslocations$paths) {
 # ---------------------------------------------
 
 # Youth
-
 for(i in synpops$names) {
 	
-	dbSendUpdate(db, paste0("alter table personfile_", i, " add column youth int"))
-	dbSendUpdate(db, paste0("update personfile_", i, " set youth = 1 where age < 18"))  # Age < 18 is taken from the mode choice model
-	dbSendUpdate(db, paste0("update personfile_", i, " set youth = 0 where age >= 18"))
+	dbSendUpdate(db, paste0("ALTER TABLE personfile_", i, " ADD COLUMN youth int"))
+	dbSendUpdate(db, paste0("UPDATE personfile_", i, " SET youth = 1 WHERE age < 18")) 
+	dbSendUpdate(db, paste0("UPDDATE personfile_", i, " SET youth = 0 WHERE age >= 18"))
 
 }
 
 # Transit
-
 for(i in trips$names) {
 	
-	dbSendUpdate(db, paste0("alter table trips_", i, " add column transit int"))
-	dbSendUpdate(db, paste0("update trips_", i, " set transit = 1 where tour_mode > 8"))  # Age < 18 is taken from the mode choice model
-	dbSendUpdate(db, paste0("update trips_", i, " set transit = 0 where tour_mode <= 8"))
+	dbSendUpdate(db, paste0("ALTER TABLE trips_", i, " ADD COLUMN transit int"))
+	dbSendUpdate(db, paste0("UPDATE trips_", i, " SET transit = 1 WHERE tour_mode > 8")) 
+	dbSendUpdate(db, paste0("UPDATE trips_", i, " SET transit = WHERE tour_mode <= 8"))
 
 }
